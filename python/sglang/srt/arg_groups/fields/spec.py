@@ -154,7 +154,9 @@ class Spec(msgspec.Struct):
             help="KV cache dtype for the speculative draft model only. The draft pool is "
             "allocated with one slot per target token (draft and target share a slot index "
             "space), so for a small draft it can still rival the target pool: a 5-layer "
-            "DFLASH draft costs 10240 bytes/token in bf16. Setting fp8_e4m3 halves the draft "
+            "DFLASH draft costs 10240 bytes/token in bf16. A windowed DFLASH draft on a "
+            "hybrid sliding-window target (--speculative-draft-window-size) takes one slot "
+            "per sliding-window slot instead. Setting fp8_e4m3 halves the draft "
             "pool; the saving shows up as free device memory, so raise "
             "--mem-fraction-static to convert it into KV capacity. Default follows "
             "--kv-cache-dtype.",
@@ -164,7 +166,7 @@ class Spec(msgspec.Struct):
     ] = None
     speculative_draft_window_size: A[
         Optional[int],
-        "Sliding window size for the draft model. Honored by Llama EAGLE-3 (`LlamaForCausalLMEagle3`), DFLASH, and the built-in EAGLE/MTP draft-decode path on the Triton and FlashInfer draft backends; other EAGLE-3 backends (e.g. MLA-based drafters) silently ignore it. For Llama EAGLE-3, the drafter only attends to the most recent N keys (verifier hidden states + its own outputs); the verifier is unaffected. For DFLASH, the draft worker keeps a recent target-token window in its local KV cache (paged backends may retain up to one extra page on the left for alignment). For the built-in EAGLE/MTP draft, each draft-decode step attends to a --speculative-draft-sink-size sink plus the most recent N tokens, leaving the target verify pass unchanged; it is ignored (with a warning) if the draft model has a native sliding window of its own. Default is full attention/context.",
+        "Sliding window size for the draft model. Honored by Llama EAGLE-3 (`LlamaForCausalLMEagle3`), DFLASH, and the built-in EAGLE/MTP draft-decode path on the Triton and FlashInfer draft backends; other EAGLE-3 backends (e.g. MLA-based drafters) silently ignore it. For Llama EAGLE-3, the drafter only attends to the most recent N keys (verifier hidden states + its own outputs); the verifier is unaffected. For DFLASH, the draft attends to the most recent N target tokens (paged backends may retain up to one extra page on the left for alignment); on a hybrid sliding-window target its KV pool then uses the target's sliding-window slots, so it is sized by --swa-full-tokens-ratio instead of the full token count, and the target keeps each request's sliding-window KV for N + block size + one page tokens. For the built-in EAGLE/MTP draft, each draft-decode step attends to a --speculative-draft-sink-size sink plus the most recent N tokens, leaving the target verify pass unchanged; it is ignored (with a warning) if the draft model has a native sliding window of its own. Default is full attention/context.",
     ] = None
     speculative_draft_sink_size: A[
         Optional[int],

@@ -588,7 +588,7 @@ Relevant parameters:
     </tr>
     <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>--speculative-draft-window-size</code></td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Draft KV sliding-window size. Must be <code>&gt;= speculative-num-draft-tokens</code> when set.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Draft KV sliding-window size. Must be <code>&gt;= speculative-num-draft-tokens</code> when set. See <a href="#draft-window">Draft window</a>.</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>None</code></td>
     </tr>
   </tbody>
@@ -650,6 +650,28 @@ Each attention-DP group runs its draft within the local attention-TP group.
 Draft execution stays eager; eligible target verify batches can use CUDA graphs.
 The scheduler separates prefill and verify rounds across DP ranks. Keep the
 experimental `SGLANG_ENABLE_DP_SPEC_PREFILL_COORDINATION` setting disabled.
+
+### Draft window
+
+`--speculative-draft-window-size N` makes the draft attend only to the most
+recent `N` target tokens. Set it to the draft's own sliding window when it has
+one (for example 4096 for the Beam DFlash2 draft); acceptance is then
+unchanged.
+
+Without it, the draft KV pool holds one slot per target token and can be as
+large as the target's own pool. With it, on a hybrid sliding-window target, the
+draft KV lives in the target's sliding-window slots instead:
+
+- the draft pool is sized by `--swa-full-tokens-ratio`, so most of its memory
+  goes back to the target's full-attention pool;
+- the target keeps each request's sliding-window KV for `N` + block size + one
+  page tokens, instead of its own window, so the sliding-window pool must hold
+  that much per running request, and per cached prefix in the radix tree.
+
+Raise `--swa-full-tokens-ratio` if the server log reports sliding-window pool
+pressure, for example with many distinct cached long prefixes. Other targets,
+and unified memory, PD disaggregation, HiCache, dp attention and context
+parallelism, keep a full-size draft pool; the startup log says why.
 
 ### LiLiCorr: reranked DFlash drafts
 
