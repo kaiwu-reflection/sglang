@@ -480,7 +480,7 @@ class RustUnifiedTreeCore(UnifiedTreeCoreInterface):
                 device=str(self.device),
                 # Rust's tree window has the same cache-history contract as
                 # SWAComponent, including the fused draft's front rows.
-                swa_sliding_window_size=params.swa_retain_window,
+                swa_sliding_window_size=params.swa_tree_window,
                 swa_req_ring=not params.swa_gates_prefix_match,
                 enable_kv_cache_events=params.enable_kv_cache_events,
                 dynamo_kv_event_format=params.dynamo_kv_event_format,

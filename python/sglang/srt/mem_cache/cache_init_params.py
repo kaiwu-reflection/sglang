@@ -61,6 +61,10 @@ class CacheInitParams:
     # Tokens back from the committed length that a fused draft reads in the
     # swa sub-pool (BaseSpecWorker.draft_swa_window); 0 when it reads none.
     draft_swa_window: int = 0
+    # SWA history a cached prefix keeps and needs to be matched, when narrower
+    # than `swa_retain_window`: a draft that clips its reads to the live SWA
+    # slots (a windowed DFLASH draft) needs only the target's history.
+    swa_match_window: Optional[int] = None
 
     # Time-to-live for cache entries in seconds. If None, TTL is disabled.
     cache_ttl_seconds: Optional[float] = None
@@ -79,8 +83,15 @@ class CacheInitParams:
     @property
     def swa_retain_window(self) -> Optional[int]:
         # Cache history required by every reader of the SWA sub-pool. Retention,
-        # tree locks, prefix matching and host transfers must use the same span.
+        # tree locks, prefix matching and host transfers must use the same span,
+        # unless `swa_match_window` narrows what a cached prefix keeps.
         # The model's attention window remains sliding_window_size.
         if self.sliding_window_size is None:
             return None
         return max(self.sliding_window_size, self.draft_swa_window)
+
+    @property
+    def swa_tree_window(self) -> Optional[int]:
+        # What a cached prefix holds: a match, a lock, a leaf cap and an insert
+        # cover this span.
+        return self.swa_match_window or self.swa_retain_window

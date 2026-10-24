@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from typing import Any, List, Optional, Tuple
@@ -239,6 +239,60 @@ def dflash_swa_retention_window(
         int(sliding_window_size or 0),
         int(draft_window_size) + int(block_size) + int(page_size),
     )
+
+
+def dflash_swa_match_window(sliding_window_size: int, *, num_verify_tokens: int) -> int:
+    """Sliding-window tokens the radix cache keeps per cached prefix when a
+    DFLASH draft shares the target's sliding-window slots.
+
+    A target verify of `num_verify_tokens` queries per request reads up to
+    `num_verify_tokens - 1` tokens before its first query's window, so the
+    cache keeps that much more than the model's window. A page freed inside
+    that reach is read through the pool's sink page.
+    """
+    return int(sliding_window_size) + max(int(num_verify_tokens) - 1, 0)
+
+
+def clip_compact_draft_to_live_swa(
+    *,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    draft_prefix_lens: torch.Tensor,
+    is_live: Callable[[torch.Tensor], torch.Tensor],
+    max_len: int,
+    page_size: int,
+) -> torch.Tensor:
+    """Shorten each compact draft window to start after its last position
+    whose sliding-window slot is no longer live.
+
+    The prefix cache matches on the target's own window, so a request that
+    hits a cached prefix may have fewer live sliding-window tokens behind it
+    than the draft window. The cut is page-aligned, so the window still starts
+    on a page boundary.
+
+    Args:
+        req_to_token: The target's req->token table (full slot ids).
+        req_pool_indices: Request rows, shape [bs].
+        prefix_lens: Committed prefix lengths, shape [bs].
+        draft_prefix_lens: Compact window lengths ending at `prefix_lens`.
+        is_live: Maps full slot ids to a bool mask of live sliding-window
+            slots.
+        max_len: Upper bound on `draft_prefix_lens`.
+        page_size: KV page size.
+
+    Returns:
+        The clipped window lengths, same dtype as `draft_prefix_lens`.
+    """
+    lens = draft_prefix_lens.to(torch.int64)
+    start = prefix_lens.to(torch.int64) - lens
+    offs = torch.arange(max_len, device=lens.device)
+    pos = (start[:, None] + offs[None, :]).clamp_(0, req_to_token.shape[1] - 1)
+    ids = req_to_token[req_pool_indices.to(torch.int64)[:, None], pos]
+    dead = (offs[None, :] < lens[:, None]) & ~is_live(ids.to(torch.int64))
+    last_dead = torch.where(dead, offs[None, :], -1).amax(dim=1)
+    cut = (last_dead + page_size) // page_size * page_size
+    return (lens - torch.minimum(cut, lens)).to(draft_prefix_lens.dtype)
 
 
 def resolve_dflash_verify_mask_policy(attn_backend: Any) -> tuple[str, bool]:

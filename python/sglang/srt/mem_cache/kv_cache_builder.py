@@ -56,6 +56,7 @@ from sglang.srt.runtime_context import (
     get_memory,
     get_parallel,
     get_schedule,
+    get_spec,
 )
 from sglang.srt.speculative.base_spec_worker import HiCacheDraftMode
 from sglang.srt.utils import ceil_align, is_hip, is_npu
@@ -338,8 +339,18 @@ def build_kv_cache(
     is_dsa = is_deepseek_dsa(model_config.hf_config)
 
     sliding_window_size = None
+    swa_match_window = None
     if is_hybrid_swa:
         sliding_window_size = tp_worker.sliding_window_size
+        if tp_worker.model_runner.spec_aux_config.dflash_draft_kv_in_swa_slots:
+            # The draft clips its window to the SWA a matched prefix still
+            # holds, so a cached prefix keeps only the target's history.
+            from sglang.srt.speculative.dflash_utils import dflash_swa_match_window
+
+            swa_match_window = dflash_swa_match_window(
+                sliding_window_size,
+                num_verify_tokens=get_spec().speculative_num_draft_tokens,
+            )
         full_tokens_per_layer, swa_tokens_per_layer = (
             tp_worker.get_tokens_per_layer_info()
         )
@@ -421,6 +432,7 @@ def build_kv_cache(
         sliding_window_size=sliding_window_size,
         swa_gates_prefix_match=swa_gates_prefix_match,
         draft_swa_window=draft_swa_window,
+        swa_match_window=swa_match_window,
         mtp_draft_device_pools=mtp_draft_device_pools,
         mtp_draft_mamba_pools=tp_worker.model_runner.mtp_draft_mamba_pools,
         sidecar_draft_device_pools=(

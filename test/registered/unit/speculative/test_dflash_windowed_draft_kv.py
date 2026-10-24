@@ -9,9 +9,12 @@ import torch
 
 from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.speculative.dflash_utils import (
+    clip_compact_draft_to_live_swa,
     dflash_swa_draft_kv_blocker,
+    dflash_swa_match_window,
     dflash_swa_retention_window,
 )
+from sglang.srt.speculative.dflash_worker_v2 import DFlashWorkerV2
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -101,8 +104,6 @@ def _first_live_position(pre_len, window, page_size):
 
 def _compact_draft_start(prefix_len, window, page_size):
     """First position the compact draft reads for a `prefix_len` prefix."""
-    from sglang.srt.speculative.dflash_worker_v2 import DFlashWorkerV2
-
     fake_self = SimpleNamespace(
         device="cpu", draft_window_size=window, page_size=page_size
     )
@@ -174,6 +175,78 @@ class TestRetentionWindow(CustomTestCase):
             _first_live_position(prefix_len + 1, draft_window, page),
             _compact_draft_start(prefix_len, draft_window, page),
         )
+
+
+class TestClipToLiveSwa(CustomTestCase):
+    """After a prefix hit the cache may hold less sliding-window KV than the
+    draft window; the draft must not read the freed slots."""
+
+    page, window = 4, 16
+
+    def _clip(self, prefix_len, dead_below):
+        """Clipped window of one request whose slots below `dead_below` were
+        freed. Slot ids are positions + 1; freed slots translate to 0."""
+        row = torch.arange(1, 65, dtype=torch.int32)[None, :]
+        lens = DFlashWorkerV2._compute_compact_draft_seq_lens(
+            SimpleNamespace(
+                device="cpu", draft_window_size=self.window, page_size=self.page
+            ),
+            torch.tensor([prefix_len]),
+        )
+        clipped = clip_compact_draft_to_live_swa(
+            req_to_token=row,
+            req_pool_indices=torch.tensor([0]),
+            prefix_lens=torch.tensor([prefix_len]),
+            draft_prefix_lens=lens,
+            is_live=lambda ids: ids > dead_below,
+            max_len=self.window + self.page,
+            page_size=self.page,
+        )
+        return int(lens[0]), int(clipped[0])
+
+    def test_fully_live_window_is_unchanged(self):
+        full, clipped = self._clip(prefix_len=30, dead_below=0)
+        self.assertEqual(clipped, full)
+        full, clipped = self._clip(prefix_len=30, dead_below=8)
+        self.assertEqual(clipped, full)
+
+    def test_window_starts_on_the_first_live_page(self):
+        # Window [12, 30); positions below 17 freed -> starts at page 20.
+        full, clipped = self._clip(prefix_len=30, dead_below=17)
+        self.assertEqual(full, 18)
+        self.assertEqual(clipped, 30 - 20)
+        # A freed page boundary at 16 keeps page 16.
+        self.assertEqual(self._clip(prefix_len=30, dead_below=16)[1], 30 - 16)
+
+    def test_no_live_slot_gives_an_empty_window(self):
+        self.assertEqual(self._clip(prefix_len=30, dead_below=30)[1], 0)
+
+
+class TestMatchWindowCoversVerify(CustomTestCase):
+    """A cached prefix keeps the sliding-window KV the target's first verify
+    reads, which reaches `block - 1` tokens before its first query's window.
+    A freed page there is read through the pool's sink page."""
+
+    window, block, page = 512, 8, 64
+
+    def _uncovered_residues(self, cached_window):
+        uncovered = []
+        for r in range(self.page):
+            prompt_len = 300 * self.page + r
+            # The insert frees up to page_floor(len(key) - 1 - window).
+            first_live = _first_live_position(prompt_len - 1, cached_window, self.page)
+            first_read = prompt_len - (self.window - 1) - (self.block - 1)
+            if first_live > first_read // self.page * self.page:
+                uncovered.append(r)
+        return uncovered
+
+    def test_cached_window_covers_every_prompt_length(self):
+        cached = dflash_swa_match_window(self.window, num_verify_tokens=self.block)
+        self.assertEqual(cached, self.window + self.block - 1)
+        self.assertEqual(self._uncovered_residues(cached), [])
+
+    def test_model_window_alone_misses_prompts_just_past_a_page(self):
+        self.assertEqual(self._uncovered_residues(self.window), [1, 2, 3, 4, 5])
 
 
 @unittest.skipUnless(_HAS_CUDA, "needs CUDA")

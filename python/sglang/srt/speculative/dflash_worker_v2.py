@@ -65,6 +65,7 @@ from sglang.srt.speculative.dflash_utils import (
     apply_dflash_simulated_acceptance,
     apply_dflash_verify_logits_adjustments,
     can_dflash_use_fused_qkv_proj,
+    clip_compact_draft_to_live_swa,
     compute_dflash_sampling_correct_drafts_and_bonus,
     is_dense_head_weight,
     is_dflash_sampling_verify_available,
@@ -1292,6 +1293,26 @@ class DFlashWorkerV2(BaseSpecWorker):
                 int(self.draft_window_size)
                 + (self.page_size if self.page_size > 1 else 0)
             )
+
+    def _clip_compact_draft_to_live_swa(
+        self,
+        *,
+        req_pool_indices: torch.Tensor,
+        prefix_lens: torch.Tensor,
+        draft_prefix_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Drop the part of each draft window whose sliding-window slots the
+        prefix cache no longer holds; see `clip_compact_draft_to_live_swa`."""
+        alloc = self.model_runner.token_to_kv_pool_allocator
+        return clip_compact_draft_to_live_swa(
+            req_to_token=self.model_runner.req_to_token_pool.req_to_token,
+            req_pool_indices=req_pool_indices,
+            prefix_lens=prefix_lens,
+            draft_prefix_lens=draft_prefix_lens,
+            is_live=lambda ids: alloc.translate_loc_from_full_to_swa(ids) > 0,
+            max_len=int(self.draft_window_size) + max(self.page_size, 1),
+            page_size=max(self.page_size, 1),
+        )
 
     def _rebuild_compact_draft_cache(
         self,
@@ -2641,6 +2662,12 @@ class DFlashWorkerV2(BaseSpecWorker):
         if self.use_compact_draft_cache:
             # Rebuild the draft-local sliding-window view from committed target state.
             draft_prefix_lens = self._compute_compact_draft_seq_lens(prefix_lens)
+            if self.draft_kv_in_swa_slots:
+                draft_prefix_lens = self._clip_compact_draft_to_live_swa(
+                    req_pool_indices=batch.req_pool_indices,
+                    prefix_lens=prefix_lens,
+                    draft_prefix_lens=draft_prefix_lens,
+                )
             self._fill_compact_seq_lens_cpu_bound(
                 batch_seq_lens_cpu=batch.seq_lens_cpu,
                 nxt_kv_lens_cpu=draft_input.nxt_kv_lens_cpu,

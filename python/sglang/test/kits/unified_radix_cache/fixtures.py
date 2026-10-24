@@ -248,6 +248,7 @@ def build_fixture(
         disable=False,
         sliding_window_size=cfg.sliding_window_size,
         draft_swa_window=cfg.draft_swa_window,
+        swa_match_window=cfg.swa_match_window,
         decoder_swa_bounded_replay=cfg.decoder_swa_bounded_replay,
         tree_components=cfg.components,
         enable_mamba_extra_buffer=cfg.enable_mamba_extra_buffer,

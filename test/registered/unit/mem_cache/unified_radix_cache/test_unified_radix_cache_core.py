@@ -703,6 +703,51 @@ class UnifiedRadixCacheCoreSuite(UnifiedRadixCacheCoreFixtures):
         cache.unlock(req.lock)
         cache.sanity_check()
 
+    @requires_swa_only
+    @requires_ps1_window4
+    def test_swa_match_window_narrower_than_retention(self):
+        """Requests keep 8 tokens of SWA live for a widened draft, which clips
+        its reads to the live slots: a cached prefix whose last 4 tokens are
+        live then matches in full."""
+        tokens = self._make_seq(1, 16)
+        matched = {}
+        for match_window in (None, 4):
+            cfg = replace(self.cfg, draft_swa_window=8, swa_match_window=match_window)
+            cache, allocator, req_to_token_pool = build_fixture(cfg)
+            req, _ = self._make_inflight_req(
+                cache, allocator, req_to_token_pool, tokens
+            )
+            req.kv.set_evicted_seqlen(ComponentType.SWA, len(tokens) - 4)
+
+            cache.checkpoint(req, up_to=req.extend_end)
+            matched[match_window] = match_prefix(cache, tokens).device_prefix_len
+            cache.unlock(req.lock)
+            cache.sanity_check()
+
+        self.assertEqual(matched[4], len(tokens))
+        self.assertLess(matched[None], len(tokens))
+
+    @requires_swa_only
+    @requires_ps1_window4
+    def test_swa_insert_keeps_only_the_match_window(self):
+        """A cached prefix keeps the target's window of SWA, not the wider
+        window its request kept live, so cached prefixes don't crowd the SWA
+        pool."""
+        cfg = replace(self.cfg, draft_swa_window=8, swa_match_window=4)
+        cache, allocator, req_to_token_pool = build_fixture(cfg)
+        tokens = self._make_seq(1, 16)
+        req, _ = self._make_inflight_req(cache, allocator, req_to_token_pool, tokens)
+
+        cache.checkpoint(req, up_to=req.extend_end)
+
+        (first,) = node_children(cache, cache.root_node_handle())
+        self.assertIsNone(node_device_value(cache, first, ComponentType.SWA))
+        (live,) = node_children(cache, first)
+        self.assertLessEqual(node_key_length(cache, live), 4 + 1)
+        self.assertEqual(match_prefix(cache, tokens).device_prefix_len, len(tokens))
+        cache.unlock(req.lock)
+        cache.sanity_check()
+
     def test_diagnostics(self):
         cache, allocator, req_to_token_pool = build_fixture(self.cfg)
         self._insert(cache, allocator, req_to_token_pool, self._make_seq(1, 2))

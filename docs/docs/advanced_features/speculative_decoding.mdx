@@ -664,12 +664,16 @@ draft KV lives in the target's sliding-window slots instead:
 
 - the draft pool is sized by `--swa-full-tokens-ratio`, so most of its memory
   goes back to the target's full-attention pool;
-- the target keeps each request's sliding-window KV for `N` + block size + one
-  page tokens, instead of its own window, so the sliding-window pool must hold
-  that much per running request, and per cached prefix in the radix tree.
+- the target keeps the sliding-window KV of each running request's generated
+  tokens for `N` + block size + one page tokens, instead of its own window;
+- the radix cache keeps only the target's own window of sliding-window KV per
+  cached prefix, plus the `--speculative-num-draft-tokens - 1` tokens a verify
+  reads before it. For the first `N` tokens after a prompt, the draft
+  therefore attends to the prompt's last target-window tokens plus what has
+  been generated since; this affects only acceptance, never outputs.
 
 Raise `--swa-full-tokens-ratio` if the server log reports sliding-window pool
-pressure, for example with many distinct cached long prefixes. Other targets,
+pressure. Other targets,
 and unified memory, PD disaggregation, HiCache, dp attention and context
 parallelism, keep a full-size draft pool; the startup log says why.
 
