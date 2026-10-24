@@ -437,16 +437,19 @@ def rebuild_compact_draft_req_to_token(
     draft_prefix_lens,
     verify_out_cache_loc,
     verify_loc_stride,
+    loc_map,
     draft_pool_len: tl.constexpr,
     target_pool_len: tl.constexpr,
     block_size: tl.constexpr,
+    HAS_LOC_MAP: tl.constexpr,
 ):
     """Rebuild one request's draft-local compact req->token row in a single pass.
 
     Row layout written: [0, prefix_len) = the committed target suffix window
     (target_req_to_token[req, suffix_start : suffix_start + prefix_len]) and
-    [prefix_len, prefix_len + block_size) = the verify block slots. Fixed grid,
-    per-row data-dependent loop bound; no host reads, so the caller never syncs.
+    [prefix_len, prefix_len + block_size) = the verify block slots, each id
+    mapped through `loc_map` when given. Fixed grid, per-row data-dependent
+    loop bound; no host reads, so the caller never syncs.
     """
     BLOCK: tl.constexpr = 256
     pid = tl.program_id(axis=0)
@@ -468,6 +471,8 @@ def rebuild_compact_draft_req_to_token(
         src = tl.load(src_row + start + col, mask=in_prefix, other=0)
         blk = tl.load(verify_row + (col - prefix_len), mask=in_block, other=0)
         val = tl.where(in_prefix, src, blk)
+        if HAS_LOC_MAP:
+            val = tl.load(loc_map + val.to(tl.int64), mask=in_prefix | in_block)
         tl.store(dst_row + col, val, mask=in_prefix | in_block)
 
 
@@ -481,6 +486,7 @@ def rebuild_compact_draft_req_to_token_func(
     verify_out_cache_loc_2d: torch.Tensor,
     batch_size: int,
     block_size: int,
+    loc_map: Optional[torch.Tensor] = None,
 ) -> None:
     rebuild_compact_draft_req_to_token[(batch_size,)](
         draft_req_to_token,
@@ -490,9 +496,11 @@ def rebuild_compact_draft_req_to_token_func(
         draft_prefix_lens,
         verify_out_cache_loc_2d,
         verify_out_cache_loc_2d.stride(0),
+        loc_map if loc_map is not None else draft_req_to_token,
         draft_req_to_token.shape[1],
         target_req_to_token.shape[1],
         block_size,
+        HAS_LOC_MAP=loc_map is not None,
     )
 
 

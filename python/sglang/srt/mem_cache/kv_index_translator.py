@@ -241,6 +241,14 @@ class KVIndexTranslator:
             else IdSpaceKind.FULL
         )
 
+    def index_writes_by(self, space: IdSpace) -> None:
+        """Index this runner's pool by ``space``'s ids, another runner's
+        sub-pool's: a windowed DFLASH draft pool takes the target's
+        sliding-window slot ids. Reads stay in this runner's own
+        `req_to_token`, which its owner fills with those ids."""
+        assert not self.is_translating and space.read_v2p is None
+        self._spaces[IdSpaceKind.FULL] = space
+
     def write_ids(
         self, forward_batch, kind: IdSpaceKind = IdSpaceKind.FULL
     ) -> Optional[torch.Tensor]:

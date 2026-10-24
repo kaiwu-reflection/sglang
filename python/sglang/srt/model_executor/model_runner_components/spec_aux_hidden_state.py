@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import msgspec
 
 from sglang.srt.configs.model_config import ModelConfig, is_deepseek_v4
-from sglang.srt.runtime_context import get_spec
+from sglang.srt.runtime_context import get_disagg, get_memory, get_parallel, get_spec
 
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
@@ -41,6 +41,9 @@ class SpecAuxHiddenStateConfig(msgspec.Struct, kw_only=True):
     # DeepSeek-V4 DSpark draft stages (DeepseekV4ForCausalLMDSpark.num_stages); a
     # bundled head inherits the target's num_hidden_layers, so that overcounts.
     dspark_num_stages: Optional[int] = None
+    # The windowed DFLASH draft pool is indexed by the target's sliding-window
+    # slot ids, so it holds one slot per live sliding-window token.
+    dflash_draft_kv_in_swa_slots: bool = False
     # The draft checkpoint read in draft mode, and its KV layer count, for
     # every drafting algorithm: the fused-draft placement's input. A private
     # EAGLE draft pool is sized by `eagle_draft_num_layers` instead.
@@ -225,3 +228,46 @@ def _resolve_dflash_aux_hidden_state(
         config.draft_model_config = draft_model_config
         config.draft_kv_num_layers = int(draft_num_layers)
         config.dflash_target_layer_ids = target_layer_ids
+        if spec_algorithm.is_dflash():
+            config.dflash_draft_kv_in_swa_slots = _resolve_dflash_draft_kv_in_swa_slots(
+                server_args=server_args, model_config=model_config
+            )
+
+
+def _resolve_dflash_draft_kv_in_swa_slots(
+    *, server_args: ServerArgs, model_config: ModelConfig
+) -> bool:
+    from sglang.srt.arg_groups.overrides import post_capture_kv_sizing_planned
+    from sglang.srt.speculative.dflash_utils import dflash_swa_draft_kv_blocker
+
+    draft_window_size = get_spec().speculative_draft_window_size
+    blocker = dflash_swa_draft_kv_blocker(
+        draft_window_size=draft_window_size,
+        target_has_swa_slots=(
+            model_config.is_hybrid_swa
+            and not model_config.is_deepseek_v4_arch
+            and bool(model_config.full_attention_layer_ids)
+        ),
+        enable_unified_memory=get_memory().enable_unified_memory,
+        disaggregation_mode=get_disagg().disaggregation_mode,
+        enable_hierarchical_cache=get_memory().enable_hierarchical_cache,
+        post_capture_kv_sizing=post_capture_kv_sizing_planned(server_args),
+        attn_dp_size=get_parallel().attn_dp_size,
+        attn_cp_size=get_parallel().attn_cp_size,
+        dcp_size=get_parallel().attn_dcp_size,
+        enable_kv_cache_sharding=get_parallel().enable_kv_cache_sharding,
+        enable_hisparse=get_memory().enable_hisparse,
+    )
+    if blocker is None:
+        logger.info(
+            "DFLASH draft KV uses the target's sliding-window slots (draft window %d).",
+            draft_window_size,
+        )
+        return True
+    if draft_window_size is not None:
+        logger.info(
+            "DFLASH draft KV keeps one slot per target token although "
+            "--speculative-draft-window-size is set: %s.",
+            blocker,
+        )
+    return False

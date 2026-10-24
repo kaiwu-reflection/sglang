@@ -756,6 +756,10 @@ class HybridSWAPoolConfigurator(MemoryPoolConfigurator):
                 )
 
         self._draft_cell_size = _dflash_draft_cell_size(kvc)
+        # A windowed DFLASH draft pool is indexed by sliding-window slot ids.
+        self._draft_cell_on_swa = self._draft_cell_size > 0 and bool(
+            kvc.spec_aux_config.dflash_draft_kv_in_swa_slots
+        )
         self._fused_full_entry = kvc.fused_entry_bytes("full")
         self._fused_swa_entry = kvc.fused_entry_bytes("swa")
         if self._fused_full_entry is not None or self._fused_swa_entry is not None:
@@ -778,7 +782,14 @@ class HybridSWAPoolConfigurator(MemoryPoolConfigurator):
     def _swa_cell_bytes(self) -> int:
         if self._fused_swa_entry is not None:
             return self._fused_swa_entry
-        return self._swa_per_token * (self._swa_layers_num + self._draft_swa_layers_num)
+        return self._swa_per_token * (
+            self._swa_layers_num + self._draft_swa_layers_num
+        ) + (self._draft_cell_size if self._draft_cell_on_swa else 0)
+
+    def _full_draft_cell_bytes(self) -> int:
+        """DFLASH draft bytes each full-side token carries: none when the draft
+        pool is indexed by sliding-window slots (priced in `_swa_cell_bytes`)."""
+        return 0 if self._draft_cell_on_swa else self._draft_cell_size
 
     def _recompute_cell_size(self) -> None:
         # Bytes per token of max_total_num_tokens: full_tokens when hybrid, else
@@ -796,7 +807,7 @@ class HybridSWAPoolConfigurator(MemoryPoolConfigurator):
                 self._full_cell_bytes()
                 + self._swa_per_token * self._draft_swa_full_layers_num
                 + self._swa_full_tokens_ratio * self._swa_cell_bytes()
-                + self._draft_cell_size
+                + self._full_draft_cell_bytes()
             )
 
     def _draft_pool_bytes_per_token(self) -> int:
@@ -1013,7 +1024,7 @@ class SWARequestCapPoolConfigurator(HybridSWAPoolConfigurator):
             full_cell_size = (
                 self._full_cell_bytes()
                 + self._swa_per_token * self._draft_swa_full_layers_num
-                + self._draft_cell_size
+                + self._full_draft_cell_bytes()
             )
             full_tokens = (
                 int((available_bytes - fixed_swa_bytes) // full_cell_size) // page_size

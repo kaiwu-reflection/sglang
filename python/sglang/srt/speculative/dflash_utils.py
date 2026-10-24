@@ -175,6 +175,72 @@ def scale_kv_cell_size_per_token_for_dflash(
     ) // int(target_num_layers)
 
 
+def dflash_swa_draft_kv_blocker(
+    *,
+    draft_window_size: Optional[int],
+    target_has_swa_slots: bool,
+    enable_unified_memory: bool,
+    disaggregation_mode: str,
+    enable_hierarchical_cache: bool,
+    post_capture_kv_sizing: bool,
+    attn_dp_size: int,
+    attn_cp_size: int,
+    dcp_size: int,
+    enable_kv_cache_sharding: bool,
+    enable_hisparse: bool,
+) -> Optional[str]:
+    """Why a windowed DFLASH draft cannot keep its KV in the target's
+    sliding-window slots, or None when it can.
+
+    The draft pool is then indexed by the target's sliding-window slot ids
+    instead of its full-attention ids, so it takes one slot per live
+    sliding-window token rather than one per target token.
+    """
+    if draft_window_size is None:
+        return "--speculative-draft-window-size is unset"
+    if not target_has_swa_slots:
+        return "the target has no paged sliding-window pool beside a full pool"
+    if enable_unified_memory:
+        return "--enable-unified-memory places the draft in the unified pool"
+    if disaggregation_mode != "null":
+        return "PD disaggregation transfers the draft KV by full-attention ids"
+    if enable_hierarchical_cache:
+        return "HiCache backs up the draft KV by full-attention ids"
+    if post_capture_kv_sizing:
+        return "post-capture KV sizing resizes the draft by full-attention ids"
+    if attn_dp_size > 1:
+        return "dp attention is not supported"
+    if attn_cp_size > 1:
+        return "attention context parallelism is not supported"
+    if dcp_size > 1:
+        return "decode context parallelism widens the draft's id space"
+    if enable_kv_cache_sharding:
+        return "KV cache sharding is not supported"
+    if enable_hisparse:
+        return "HiSparse is not supported"
+    return None
+
+
+def dflash_swa_retention_window(
+    sliding_window_size: Optional[int],
+    *,
+    draft_window_size: int,
+    block_size: int,
+    page_size: int,
+) -> int:
+    """Sliding-window tokens a request keeps live when the DFLASH draft KV
+    shares the target's sliding-window slots.
+
+    The compact draft reads `draft_window_size` committed tokens back from a
+    page boundary, plus its verify block; one more page covers a scheduler
+    eviction frontier that leads the draft's prefix.
+    """
+    return max(
+        int(sliding_window_size or 0),
+        int(draft_window_size) + int(block_size) + int(page_size),
+    )
+
+
 def resolve_dflash_verify_mask_policy(attn_backend: Any) -> tuple[str, bool]:
     from sglang.srt.layers.attention.hybrid_attn_backend import HybridAttnBackend
     from sglang.srt.layers.attention.tbo_backend import TboAttnBackend

@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import math
 import os
@@ -30,7 +31,7 @@ from sglang.srt.lora.layers import unwrap_lora_layer
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
-from sglang.srt.mem_cache.kv_loc_plan import KVLocPlan
+from sglang.srt.mem_cache.kv_loc_plan import IdSpaceKind, KVLocPlan
 from sglang.srt.mem_cache.memory_pool import KVWriteLoc
 from sglang.srt.model_executor.cuda_graph_config import Backend
 from sglang.srt.model_executor.forward_batch_info import (
@@ -404,6 +405,12 @@ class DFlashWorkerV2(BaseSpecWorker):
         # Normalized in arg_groups.speculative_hook.handle_speculative_decoding.
         self.draft_window_size: Optional[int] = get_spec().speculative_draft_window_size
         self.use_compact_draft_cache = self.draft_window_size is not None
+        # The compact draft pool then takes the target's sliding-window slot
+        # ids, holding only the tokens the target keeps for its window.
+        self.draft_kv_in_swa_slots = bool(
+            self.model_runner.spec_aux_config.dflash_draft_kv_in_swa_slots
+        )
+        assert self.use_compact_draft_cache or not self.draft_kv_in_swa_slots
         self.device = target_worker.device
 
         self._warned_sampling_fallback = False
@@ -544,12 +551,13 @@ class DFlashWorkerV2(BaseSpecWorker):
         self._cache_full_embed_weight()
         if get_parallel().tp_rank == 0:
             logger.info(
-                "Initialized DFLASH draft runner. attention_backend=%s, model=%s, block_size=%s, draft_window_size=%s, compact_cache=%s",
+                "Initialized DFLASH draft runner. attention_backend=%s, model=%s, block_size=%s, draft_window_size=%s, compact_cache=%s, swa_slots=%s",
                 bundle.resolved_attention_backend,
                 self.draft_model.__class__.__name__,
                 self.block_size,
                 self.draft_window_size,
                 self.use_compact_draft_cache,
+                self.draft_kv_in_swa_slots,
             )
             if self._is_domino:
                 logger.info(
@@ -673,6 +681,14 @@ class DFlashWorkerV2(BaseSpecWorker):
         # enabled, the draft worker keeps a private compact req->token table
         # over the same global KV index space, so radix-cache/prefix-hit KV
         # remains reusable while draft attention sees only the recent window.
+        # A draft in the sliding-window slots sizes its pool by that space.
+        if self.draft_kv_in_swa_slots:
+            memory_pool_config = dataclasses.replace(
+                memory_pool_config,
+                max_total_num_tokens=memory_pool_config.swa_max_total_num_tokens,
+                full_max_total_num_tokens=None,
+                swa_max_total_num_tokens=None,
+            )
         with draft_tp_context(self.draft_parallel_layout):
             self._draft_worker.alloc_memory_pool(
                 memory_pool_config=memory_pool_config,
@@ -681,6 +697,20 @@ class DFlashWorkerV2(BaseSpecWorker):
                 ),
                 token_to_kv_pool_allocator=token_to_kv_pool_allocator,
             )
+        if self.draft_kv_in_swa_slots:
+            swa_space = self.model_runner.kv_index_translator.space(
+                IdSpaceKind.SLIDING_WINDOW
+            )
+            assert swa_space is not None, "target has no sliding-window sub-pool"
+            self.draft_model_runner.kv_index_translator.index_writes_by(swa_space)
+
+    @property
+    def draft_swa_window(self) -> int:
+        # The draft's KV rides the target's sliding-window slots, which the
+        # target then keeps for the draft window.
+        if not self.draft_kv_in_swa_slots:
+            return super().draft_swa_window
+        return self.model_runner.swa_retention_window
 
     def init_attention_backends(self):
         with (
@@ -1274,8 +1304,14 @@ class DFlashWorkerV2(BaseSpecWorker):
         block_size: int,
     ) -> None:
         """Write the draft-local compact req->token rows: the committed suffix
-        window at [0, draft_prefix_len) plus the verify block slots after it."""
+        window at [0, draft_prefix_len) plus the verify block slots after it,
+        as sliding-window slot ids when the draft pool is indexed by them."""
         suffix_start = prefix_lens.to(torch.int64) - draft_prefix_lens.to(torch.int64)
+        loc_map = (
+            self.model_runner.token_to_kv_pool.full_to_swa_index_mapping
+            if self.draft_kv_in_swa_slots
+            else None
+        )
         if self._use_triton_compact_rebuild:
             rebuild_compact_draft_req_to_token_func(
                 draft_req_to_token=self.draft_model_runner.req_to_token_pool.req_to_token,
@@ -1286,6 +1322,7 @@ class DFlashWorkerV2(BaseSpecWorker):
                 verify_out_cache_loc_2d=verify_out_cache_loc_2d,
                 batch_size=bs,
                 block_size=block_size,
+                loc_map=loc_map,
             )
         else:
             suffix_cache_loc = self._gather_req_to_token_segments(
@@ -1294,6 +1331,9 @@ class DFlashWorkerV2(BaseSpecWorker):
                 start=suffix_start,
                 lengths=draft_prefix_lens,
             )
+            if loc_map is not None:
+                suffix_cache_loc = loc_map[suffix_cache_loc]
+                verify_out_cache_loc_2d = loc_map[verify_out_cache_loc_2d]
             assign_req_to_token_pool_func(
                 req_pool_indices,
                 self.draft_model_runner.req_to_token_pool.req_to_token,

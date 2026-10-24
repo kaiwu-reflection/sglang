@@ -189,6 +189,7 @@ def _make_model_runner(
         eagle_draft_num_layers=None,
         eagle_draft_swa_num_layers=None,
         dflash_draft_num_layers=None,
+        dflash_draft_kv_in_swa_slots=False,
     )
     # Fused draft KV is off unless a test opts in (a bare MagicMock return
     # would read as a truthy entry size and take the fused pricing branch).
@@ -1398,6 +1399,7 @@ class TestDflashDraftKvBudget(CustomTestCase):
         mr.spec_aux_config = SimpleNamespace(
             eagle_draft_num_layers=None,
             dflash_draft_num_layers=5,
+            dflash_draft_kv_in_swa_slots=False,
         )
 
         mr.dflash_draft_cell_size_per_token = draft_kv_per_token
@@ -1439,6 +1441,7 @@ class TestDflashDraftKvBudget(CustomTestCase):
             mr.spec_aux_config = SimpleNamespace(
                 eagle_draft_num_layers=None,
                 dflash_draft_num_layers=5,
+                dflash_draft_kv_in_swa_slots=False,
             )
             with mock_cpu_env():
                 from sglang.srt.model_executor.pool_configurator import (
@@ -1450,6 +1453,76 @@ class TestDflashDraftKvBudget(CustomTestCase):
             return config.full_max_total_num_tokens
 
         self.assertLess(_tokens(10240), _tokens(None))
+
+    def _windowed_draft_runner(self, draft_kv_in_swa_slots, **kwargs):
+        mr = _make_model_runner(
+            self,
+            is_hybrid_swa=True,
+            full_attention_layer_ids=list(range(16)),
+            swa_attention_layer_ids=list(range(16, 32)),
+            swa_num_kv_heads=4,
+            swa_full_tokens_ratio=0.1,
+            **kwargs,
+        )
+        mr.spec_algorithm.is_dflash_family.return_value = True
+        mr.dflash_draft_cell_size_per_token = 10_240
+        mr.spec_aux_config = SimpleNamespace(
+            eagle_draft_num_layers=None,
+            dflash_draft_num_layers=5,
+            dflash_draft_kv_in_swa_slots=draft_kv_in_swa_slots,
+        )
+        return mr
+
+    def test_windowed_draft_is_priced_per_sliding_window_slot(self):
+        """A draft pool indexed by sliding-window slots costs its bytes once
+        per SWA token, so the full pool grows while the budget still holds."""
+        available = 100_000_000
+        configs = {}
+        for in_swa in (False, True):
+            mr = self._windowed_draft_runner(in_swa)
+            with mock_cpu_env():
+                from sglang.srt.model_executor.pool_configurator import (
+                    create_memory_pool_configurator,
+                )
+
+                cfg = create_memory_pool_configurator(mr)
+                configs[in_swa] = cfg.calculate_pool_sizes(
+                    available, get_schedule().page_size
+                )
+        windowed = configs[True]
+        self.assertGreater(
+            windowed.full_max_total_num_tokens,
+            configs[False].full_max_total_num_tokens,
+        )
+        used = windowed.full_max_total_num_tokens * _full_per_token(mr) * 16
+        used += windowed.swa_max_total_num_tokens * (_swa_per_token(mr) * 16 + 10_240)
+        self.assertLessEqual(used, available)
+        self.assertGreater(used, available * 0.99)
+
+    def test_swa_chunk_cap_prices_windowed_draft_per_sliding_window_slot(self):
+        available = 10_000_000
+        mr = self._windowed_draft_runner(
+            True,
+            disable_radix_cache=True,
+            chunked_prefill_size=4,
+            sliding_window_size=8,
+            page_size=1,
+            max_running_requests=2,
+        )
+        with mock_cpu_env():
+            from sglang.srt.model_executor.pool_configurator import (
+                SWARequestCapPoolConfigurator,
+                create_memory_pool_configurator,
+            )
+
+            cfg = create_memory_pool_configurator(mr)
+            config = cfg.calculate_pool_sizes(available, page_size=1)
+
+        self.assertIsInstance(cfg, SWARequestCapPoolConfigurator)
+        used = config.full_max_total_num_tokens * _full_per_token(mr) * 16
+        used += config.swa_max_total_num_tokens * (_swa_per_token(mr) * 16 + 10_240)
+        self.assertLessEqual(used, available)
+        self.assertGreater(used, available * 0.99)
 
 
 class TestSWAPoolFloor(CustomTestCase):

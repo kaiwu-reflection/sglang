@@ -666,7 +666,7 @@ class ModelRunner:
             kv_cache_dtype_str=self.kv_cache_dtype_str,
             model_dtype=self.dtype,
             page_size=self.page_size,
-            sliding_window_size=self.sliding_window_size,
+            sliding_window_size=self.swa_retention_window,
             spec_algorithm=self.spec_algorithm,
             is_draft_worker=self.is_draft_worker,
             post_capture_kv_active=is_post_capture_kv_active(
@@ -1512,6 +1512,25 @@ class ModelRunner:
         if (req_to_token_pool := getattr(self, "req_to_token_pool", None)) is not None:
             return req_to_token_pool.schedulable_token_capacity(capacity)
         return capacity
+
+    @property
+    def swa_retention_window(self) -> Optional[int]:
+        """Sliding-window tokens each request keeps live: the model's window,
+        widened to the DFLASH draft window when the draft KV shares the
+        sliding-window slots. Attention still applies the model's window."""
+        if (
+            self.sliding_window_size is None
+            or not self.spec_aux_config.dflash_draft_kv_in_swa_slots
+        ):
+            return self.sliding_window_size
+        from sglang.srt.speculative.dflash_utils import dflash_swa_retention_window
+
+        return dflash_swa_retention_window(
+            self.sliding_window_size,
+            draft_window_size=get_spec().speculative_draft_window_size,
+            block_size=get_spec().speculative_num_draft_tokens,
+            page_size=self.page_size,
+        )
 
     @property
     def max_token_pool_size(self):

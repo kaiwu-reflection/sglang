@@ -432,7 +432,7 @@ def build_kv_cache(
     )
     if params.swa_retain_window != sliding_window_size:
         logger.info(
-            "SWA eviction keeps %d tokens back: the fused draft reads past the "
+            "SWA eviction keeps %d tokens back: the draft reads past the "
             "%d-token window.",
             params.swa_retain_window,
             sliding_window_size,
