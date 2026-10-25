@@ -371,6 +371,7 @@ class TestDecodeRetractionBackup(CustomTestCase):
                 waiting_queue=[],
                 last_batch=None,
                 sliding_window_size=8 if hybrid_swa else None,
+                swa_transfer_window=8 if hybrid_swa else None,
                 enable_hisparse=False,
                 enable_decode_hicache=False,
                 enable_lora=False,

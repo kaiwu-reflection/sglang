@@ -53,6 +53,7 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     build_kv_layer_ids,
     build_staging_slot_metadata,
+    draft_kv_in_swa_slots,
     get_dsa_tail_state_indices,
     get_kv_class,
     get_kv_transfer_buf_infos,
@@ -305,7 +306,7 @@ class PrefillBootstrapQueue:
             else None
         )
         num_draft_entries = 0
-        if draft_kv_pool is not None:
+        if draft_kv_pool is not None and not draft_kv_in_swa_slots(draft_kv_pool):
             # Draft KV shares target virtual ids. Unified target KV is transferred
             # with physical ids, so it needs a separate draft index vector.
             draft_kv_data_ptrs, draft_kv_data_lens, draft_kv_item_lens = (
@@ -1587,7 +1588,7 @@ class SchedulerDisaggregationPrefillMixin:
                 # Under encoder replay the scheduler is not hybrid SWA and keeps no
                 # window size; the pool holds it.
                 window_size = (
-                    self.sliding_window_size
+                    self.swa_transfer_window
                     if request_window is None
                     else kvcache.sliding_window
                 )

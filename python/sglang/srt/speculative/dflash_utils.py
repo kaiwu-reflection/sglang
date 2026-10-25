@@ -202,10 +202,6 @@ def dflash_swa_draft_kv_blocker(
         return "the target has no paged sliding-window pool beside a full pool"
     if enable_unified_memory:
         return "--enable-unified-memory places the draft in the unified pool"
-    if disaggregation_mode != "null":
-        return "PD disaggregation transfers the draft KV by full-attention ids"
-    if enable_hierarchical_cache:
-        return "HiCache backs up the draft KV by full-attention ids"
     if post_capture_kv_sizing:
         return "post-capture KV sizing resizes the draft by full-attention ids"
     if attn_dp_size > 1:

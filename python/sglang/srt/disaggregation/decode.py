@@ -63,6 +63,7 @@ from sglang.srt.disaggregation.utils import (
     all_reduce_flags,
     build_kv_layer_ids,
     build_staging_slot_metadata,
+    draft_kv_in_swa_slots,
     get_dsa_tail_state_indices,
     get_kv_class,
     get_kv_transfer_buf_infos,
@@ -564,7 +565,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         if not self._uses_swa_tail_prealloc() or seq_len <= 0:
             return max(seq_len, 0)
 
-        window_size = self.scheduler.sliding_window_size
+        window_size = self.scheduler.swa_transfer_window
         if window_size is None or window_size <= 0:
             return seq_len
 
@@ -643,7 +644,9 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             kv_item_lens += device_kv_item_lens[c4_layer_num:]
             kv_data_mem_kinds += ["VRAM"] * len(device_kv_data_ptrs[c4_layer_num:])
         num_draft_entries = 0
-        if self.draft_token_to_kv_pool is not None:
+        if self.draft_token_to_kv_pool is not None and not draft_kv_in_swa_slots(
+            self.draft_token_to_kv_pool
+        ):
             # Draft KV shares target virtual ids. Unified target KV is transferred
             # with physical ids, so it needs a separate draft index vector.
             draft_kv_data_ptrs, draft_kv_data_lens, draft_kv_item_lens = (
@@ -732,7 +735,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                         self.req_to_token_pool, pool.swa_kv_pool
                     ),
                     ceil_align(
-                        self.scheduler.sliding_window_size + pool.page_size - 1,
+                        self.scheduler.swa_transfer_window + pool.page_size - 1,
                         pool.page_size,
                     ),
                 )
@@ -1671,7 +1674,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 ]
 
             def _swa_payload():
-                window_size = self.scheduler.sliding_window_size
+                window_size = self.scheduler.swa_transfer_window
                 window_start = max(total_prefix_len, seq_len - window_size)
                 window_start = page_align_floor(window_start, page_size)
                 window_kv_indices_full = self.req_to_token_pool.req_to_token[
@@ -1889,7 +1892,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         swa_num_tokens = 0
         if self.host_swa_pool is not None:
             window_start = page_align_floor(
-                max(0, seq_len - self.scheduler.sliding_window_size), page_size
+                max(0, seq_len - self.scheduler.swa_transfer_window), page_size
             )
             swa_num_tokens = num_tokens - window_start
             required_swa_tokens = swa_num_tokens + self.host_swa_reserved_tokens
@@ -2164,13 +2167,14 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         if reserved_tokens is None:
             reserved_tokens = self._active_reserved_tokens(n_active)
 
-        # SWA growth is bounded by the sliding window: once a req's SWA
-        # footprint reaches `sliding_window_size`, further decode tokens
-        # evict old ones and net growth is zero. The linear reservation
+        # SWA growth is bounded by the retained window: once a req's SWA
+        # footprint reaches `swa_retain_window` (the sliding window, or a
+        # draft's wider one), further decode tokens evict old ones and net
+        # growth is zero. The linear reservation
         # `num_reserved_decode_tokens * n_active` (correct for the full
         # pool) over-reserves SWA in steady state. Cap by the actual
         # remaining headroom up to per-req window cap.
-        window_size = self.scheduler.sliding_window_size or 0
+        window_size = self.tree_cache.swa_retain_window or 0
         allocator = self.token_to_kv_pool_allocator
         _, (swa_total, swa_available) = allocator.swa_capacity_and_available(
             full_capacity=allocator.size_full, swa_capacity=allocator.size_swa

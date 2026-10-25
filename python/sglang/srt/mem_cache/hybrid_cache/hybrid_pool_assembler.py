@@ -1707,9 +1707,13 @@ def build_swa_draft_pools(
     *,
     draft_kv_pool: Any,
     tree_cache: Any,
+    draft_swa_pool: Any = None,
 ) -> tuple[list[SidecarPoolSpec], list[PoolEntry]]:
-    """Build a draft SWA sidecar whose indices follow target SWA."""
-    draft_swa_pool = draft_kv_pool.swa_kv_pool
+    """Build a draft SWA sidecar whose indices follow target SWA: the draft's
+    own SWA sub-pool, or `draft_swa_pool` when the whole draft pool is indexed
+    by the target's sliding-window slots."""
+    if draft_swa_pool is None:
+        draft_swa_pool = draft_kv_pool.swa_kv_pool
     if draft_swa_pool is None:
         raise NotImplementedError(
             "HiCache draft SWA sidecar requires a non-unified draft SWA pool."
@@ -1826,6 +1830,13 @@ def build_hicache_draft_sidecars(
 
     assert len(draft_device_pools) == 1
     draft_kv_pool = draft_device_pools[0]
+    if getattr(draft_kv_pool, "indexed_by_target_swa_slots", False):
+        # A windowed DFLASH draft: every layer follows the target's SWA slots.
+        return build_swa_draft_pools(
+            draft_kv_pool=draft_kv_pool,
+            tree_cache=tree_cache,
+            draft_swa_pool=draft_kv_pool,
+        )
     builder = (
         build_swa_draft_pools
         if isinstance(draft_kv_pool, BaseSWAKVPool)

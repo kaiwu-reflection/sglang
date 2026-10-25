@@ -673,9 +673,19 @@ draft KV lives in the target's sliding-window slots instead:
   been generated since; this affects only acceptance, never outputs.
 
 Raise `--swa-full-tokens-ratio` if the server log reports sliding-window pool
-pressure. Other targets,
-and unified memory, PD disaggregation, HiCache, dp attention and context
-parallelism, keep a full-size draft pool; the startup log says why.
+pressure.
+
+With PD disaggregation the draft's KV travels with the target's
+sliding-window KV: the prefill server sends the window a cached prefix keeps
+(the target's window plus the verify's reach), and the decode server's draft
+starts from it. HiCache backs up and loads back the draft's rows with the
+target's sliding-window pages. Run both servers with the same
+`--speculative-draft-window-size`, and size the decode server's
+`--swa-full-tokens-ratio` for `N` + block size + one page sliding-window
+tokens per running request.
+
+Other targets, `--enable-unified-memory`, dp attention and context
+parallelism keep a full-size draft pool; the startup log says why.
 
 ### LiLiCorr: reranked DFlash drafts
 

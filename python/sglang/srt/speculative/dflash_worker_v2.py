@@ -704,6 +704,8 @@ class DFlashWorkerV2(BaseSpecWorker):
             )
             assert swa_space is not None, "target has no sliding-window sub-pool"
             self.draft_model_runner.kv_index_translator.index_writes_by(swa_space)
+            # PD and HiCache carry this pool with the target's sliding-window KV.
+            self.draft_model_runner.token_to_kv_pool.indexed_by_target_swa_slots = True
 
     @property
     def draft_swa_window(self) -> int:

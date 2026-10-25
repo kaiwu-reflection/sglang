@@ -46,8 +46,6 @@ class TestBlocker(CustomTestCase):
             ("draft_window_size", None),
             ("target_has_swa_slots", False),
             ("enable_unified_memory", True),
-            ("disaggregation_mode", "decode"),
-            ("enable_hierarchical_cache", True),
             ("post_capture_kv_sizing", True),
             ("attn_dp_size", 2),
             ("attn_cp_size", 2),
@@ -59,6 +57,98 @@ class TestBlocker(CustomTestCase):
                 self.assertIsNotNone(
                     dflash_swa_draft_kv_blocker(**{**_SUPPORTED, field: value})
                 )
+
+
+class TestPdBlocker(CustomTestCase):
+    def test_hicache_is_supported_without_unified_memory(self):
+        self.assertIsNone(
+            dflash_swa_draft_kv_blocker(
+                **{**_SUPPORTED, "enable_hierarchical_cache": True}
+            )
+        )
+        self.assertIsNotNone(
+            dflash_swa_draft_kv_blocker(
+                **{
+                    **_SUPPORTED,
+                    "enable_hierarchical_cache": True,
+                    "enable_unified_memory": True,
+                }
+            )
+        )
+
+    def test_pd_is_supported_without_unified_memory(self):
+        for mode in ("prefill", "decode"):
+            with self.subTest(mode=mode):
+                self.assertIsNone(
+                    dflash_swa_draft_kv_blocker(
+                        **{**_SUPPORTED, "disaggregation_mode": mode}
+                    )
+                )
+
+    def test_pd_with_unified_memory_blocks(self):
+        self.assertIsNotNone(
+            dflash_swa_draft_kv_blocker(
+                **{
+                    **_SUPPORTED,
+                    "disaggregation_mode": "prefill",
+                    "enable_unified_memory": True,
+                }
+            )
+        )
+
+
+class TestPdTransfer(CustomTestCase):
+    """A draft pool in the target's sliding-window slots travels as
+    sliding-window state, so the PD transfer moves it with the target's
+    sliding-window page indices."""
+
+    @staticmethod
+    def _kv_args():
+        return SimpleNamespace(
+            state_types=[],
+            state_data_ptrs=[],
+            state_data_lens=[],
+            state_item_lens=[],
+            state_dim_per_tensor=[],
+            state_conv_shard_groups=[],
+            state_slice_outer_counts=[],
+            state_layer_ids=[],
+        )
+
+    @staticmethod
+    def _draft_pool(in_swa_slots):
+        pool = SimpleNamespace(
+            get_contiguous_buf_infos=lambda: ([11, 12], [1024, 1024], [64, 64])
+        )
+        if in_swa_slots:
+            pool.indexed_by_target_swa_slots = True
+        return pool
+
+    def test_windowed_draft_is_sliding_window_state(self):
+        from sglang.srt.disaggregation.base.conn import StateType
+        from sglang.srt.disaggregation.utils import (
+            draft_kv_in_swa_slots,
+            setup_state_kv_args,
+        )
+
+        draft = self._draft_pool(in_swa_slots=True)
+        kv_args = self._kv_args()
+        setup_state_kv_args(kv_args, SimpleNamespace(), draft)
+        self.assertTrue(draft_kv_in_swa_slots(draft))
+        self.assertEqual(kv_args.state_types, [StateType.SWA])
+        self.assertEqual(kv_args.state_data_ptrs, [[11, 12]])
+
+    def test_full_indexed_draft_stays_out_of_state(self):
+        from sglang.srt.disaggregation.utils import (
+            draft_kv_in_swa_slots,
+            setup_state_kv_args,
+        )
+
+        draft = self._draft_pool(in_swa_slots=False)
+        kv_args = self._kv_args()
+        setup_state_kv_args(kv_args, SimpleNamespace(), draft)
+        self.assertFalse(draft_kv_in_swa_slots(draft))
+        self.assertEqual(kv_args.state_types, [])
 
 
 class _ReqKv:

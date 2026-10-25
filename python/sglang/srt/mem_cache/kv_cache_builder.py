@@ -22,6 +22,9 @@ class KVCacheBuildResult:
     token_to_kv_pool_allocator: object
     disable_radix_cache: bool
     tree_cache: object
+    # Sliding-window tokens a request carries across PD: the window a cached
+    # prefix keeps, which can be narrower than `sliding_window_size`.
+    swa_transfer_window: Optional[int] = None
 
 
 from typing import TYPE_CHECKING
@@ -501,4 +504,5 @@ def build_kv_cache(
         token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         disable_radix_cache=disable_radix_cache,
         tree_cache=tree_cache,
+        swa_transfer_window=swa_match_window or sliding_window_size,
     )

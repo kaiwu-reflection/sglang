@@ -66,7 +66,7 @@ def state_indices_for_request(
         )
     if isinstance(pool, SWAKVPool):
         page_size = scheduler.token_to_kv_pool_allocator.page_size
-        window_size = scheduler.sliding_window_size
+        window_size = scheduler.swa_transfer_window
         window_start = max(start_idx, seq_len - window_size)
         window_start = (window_start // page_size) * page_size
         window_full = scheduler.req_to_token_pool.req_to_token[

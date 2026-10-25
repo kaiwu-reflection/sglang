@@ -604,6 +604,7 @@ class Scheduler(
         self.is_hybrid_swa = result.is_hybrid_swa
         self.is_hybrid_ssm = result.is_hybrid_ssm
         self.sliding_window_size = result.sliding_window_size
+        self.swa_transfer_window = result.swa_transfer_window
         self.full_tokens_per_layer = result.full_tokens_per_layer
         self.swa_tokens_per_layer = result.swa_tokens_per_layer
         self.req_to_token_pool = result.req_to_token_pool

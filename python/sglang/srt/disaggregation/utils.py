@@ -1459,6 +1459,13 @@ def get_kv_transfer_buf_infos(pool):
     return pool.get_contiguous_buf_infos()
 
 
+def draft_kv_in_swa_slots(draft_token_to_kv_pool) -> bool:
+    """Whether the draft pool is indexed by the target's sliding-window slot
+    ids (a windowed DFLASH draft), so its KV travels as sliding-window state
+    with the target's sliding-window page indices."""
+    return bool(getattr(draft_token_to_kv_pool, "indexed_by_target_swa_slots", False))
+
+
 def setup_state_kv_args(
     kv_args: KVArgs,
     token_to_kv_pool,
@@ -1856,6 +1863,13 @@ def setup_state_kv_args(
             append_state_component(
                 kv_args, StateType.REQUEST_ROW, row_ptrs, row_lens, row_item_lens
             )
+
+    if draft_kv_in_swa_slots(draft_token_to_kv_pool):
+        append_state_component(
+            kv_args,
+            StateType.SWA,
+            *draft_token_to_kv_pool.get_contiguous_buf_infos(),
+        )
 
     if (
         StateType.MAMBA not in kv_args.state_types

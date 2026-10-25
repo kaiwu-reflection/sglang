@@ -290,6 +290,7 @@ class TestDeepSeekV4HiSparseAllocator(CustomTestCase):
             hisparse_coordinator=coordinator,
             server_args=SimpleNamespace(disaggregation_decode_enable_radix_cache=False),
             sliding_window_size=sliding_window_size,
+            swa_transfer_window=sliding_window_size,
         )
         queue._uses_swa_tail_prealloc = MagicMock(return_value=True)
 
