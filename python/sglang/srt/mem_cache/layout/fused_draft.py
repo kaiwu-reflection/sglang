@@ -173,6 +173,9 @@ class DraftLayerSet(msgspec.Struct, frozen=True, kw_only=True):
     geometry: Any
     # LAYER_WINDOW only: how many tokens back the layers read.
     window: Optional[int] = None
+    # LAYER_WINDOW only: the layers read their window through the draft's own
+    # request rows (a windowed DFLASH draft), not a per-step window rail.
+    reads_own_rows: bool = False
 
 
 class DraftKVProfile(msgspec.Struct, frozen=True, kw_only=True):
@@ -322,6 +325,8 @@ class WindowHostKind(DenseHostKind):
     def prerequisite(
         self, *, layers: DraftLayerSet, ctx: PlacementContext
     ) -> Optional[str]:
+        if layers.reads_own_rows:
+            return None
         unrailed = sorted(set(ctx.draft_backends) - WINDOW_RAIL_BACKENDS)
         if unrailed:
             return (
@@ -405,6 +410,9 @@ class FusedDraftPlacement(msgspec.Struct, frozen=True, kw_only=True):
 
     runners: Tuple[RunnerLanes, ...]
     regions: Dict[str, DraftRegion] = {}
+    # Hosts whose draft layers read through the draft's own request rows
+    # (`DraftLayerSet.reads_own_rows`), not the host's window rail.
+    own_rows_hosts: Tuple[str, ...] = ()
 
     def __post_init__(self):
         assert len(self.runners) > 0, "a placement needs at least one draft runner"
@@ -439,6 +447,7 @@ class FusedDraftPlacement(msgspec.Struct, frozen=True, kw_only=True):
         *,
         counts: Mapping[str, Sequence[int]],
         regions: Mapping[str, DraftRegion],
+        own_rows_hosts: Sequence[str] = (),
     ) -> "FusedDraftPlacement":
         """Tile each host's region with the runners' layer counts, in runner order."""
         num_runners = {len(per_runner) for per_runner in counts.values()}
@@ -458,6 +467,7 @@ class FusedDraftPlacement(msgspec.Struct, frozen=True, kw_only=True):
         return cls(
             runners=tuple(RunnerLanes(ranges=r) for r in ranges),
             regions=dict(regions),
+            own_rows_hosts=tuple(own_rows_hosts),
         )
 
 
@@ -549,6 +559,25 @@ def draft_kv_profile(
             ),
         )
     return DraftKVProfile(num_layers=num_layers, num_depths=num_depths, kinds=kinds)
+
+
+def window_bounded_profile(profile: DraftKVProfile, *, window: int) -> DraftKVProfile:
+    """``profile`` for a full-attention draft that reads only the last
+    ``window`` tokens, through its own request rows (a windowed DFLASH draft):
+    every layer becomes a window layer, so the swa sub-pool, which keeps that
+    window, can carry it."""
+    assert set(profile.kinds) == {LAYER_FULL}, (
+        f"a window-bounded draft has full-attention layers only, got {sorted(profile.kinds)}"
+    )
+    layers = profile.kinds[LAYER_FULL]
+    return msgspec.structs.replace(
+        profile,
+        kinds={
+            LAYER_WINDOW: msgspec.structs.replace(
+                layers, window=int(window), reads_own_rows=True
+            )
+        },
+    )
 
 
 class FusedDraftDecision(msgspec.Struct, frozen=True, kw_only=True):
@@ -701,6 +730,12 @@ def place_fused_draft(
         for host, c in placed.items()
     }
     return FusedDraftDecision(
-        placement=FusedDraftPlacement.from_counts(counts=placed, regions=regions),
+        placement=FusedDraftPlacement.from_counts(
+            counts=placed,
+            regions=regions,
+            own_rows_hosts=[
+                host for host in placed if host_layers[host].reads_own_rows
+            ],
+        ),
         note="; ".join(notes) or None,
     )

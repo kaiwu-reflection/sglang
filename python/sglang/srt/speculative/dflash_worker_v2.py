@@ -33,6 +33,7 @@ from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.mem_cache.kv_loc_plan import IdSpaceKind, KVLocPlan
 from sglang.srt.mem_cache.memory_pool import KVWriteLoc
+from sglang.srt.mem_cache.unified_draft_pool import fused_draft_host_allocator
 from sglang.srt.model_executor.cuda_graph_config import Backend
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
@@ -49,6 +50,7 @@ from sglang.srt.model_executor.runner_utils.pool import (
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import (
     get_exec,
+    get_memory,
     get_parallel,
     get_schedule,
     get_spec,
@@ -412,6 +414,12 @@ class DFlashWorkerV2(BaseSpecWorker):
             self.model_runner.spec_aux_config.dflash_draft_kv_in_swa_slots
         )
         assert self.use_compact_draft_cache or not self.draft_kv_in_swa_slots
+        # Under unified memory the draft's rows are fused into the target's
+        # sliding-window entries and its translator maps ids; otherwise the
+        # worker sizes a private pool and maps ids itself.
+        self._draft_swa_slots_private = (
+            self.draft_kv_in_swa_slots and not get_memory().enable_unified_memory
+        )
         self.device = target_worker.device
 
         self._warned_sampling_fallback = False
@@ -683,7 +691,7 @@ class DFlashWorkerV2(BaseSpecWorker):
         # over the same global KV index space, so radix-cache/prefix-hit KV
         # remains reusable while draft attention sees only the recent window.
         # A draft in the sliding-window slots sizes its pool by that space.
-        if self.draft_kv_in_swa_slots:
+        if self._draft_swa_slots_private:
             memory_pool_config = dataclasses.replace(
                 memory_pool_config,
                 max_total_num_tokens=memory_pool_config.swa_max_total_num_tokens,
@@ -698,7 +706,12 @@ class DFlashWorkerV2(BaseSpecWorker):
                 ),
                 token_to_kv_pool_allocator=token_to_kv_pool_allocator,
             )
-        if self.draft_kv_in_swa_slots:
+        if self.draft_kv_in_swa_slots and not self._draft_swa_slots_private:
+            assert (
+                fused_draft_host_allocator(self.draft_model_runner.token_to_kv_pool)
+                is not None
+            ), "windowed DFLASH draft under unified memory did not fuse"
+        elif self.draft_kv_in_swa_slots:
             swa_space = self.model_runner.kv_index_translator.space(
                 IdSpaceKind.SLIDING_WINDOW
             )
@@ -1330,7 +1343,7 @@ class DFlashWorkerV2(BaseSpecWorker):
         suffix_start = prefix_lens.to(torch.int64) - draft_prefix_lens.to(torch.int64)
         loc_map = (
             self.model_runner.token_to_kv_pool.full_to_swa_index_mapping
-            if self.draft_kv_in_swa_slots
+            if self._draft_swa_slots_private
             else None
         )
         if self._use_triton_compact_rebuild:

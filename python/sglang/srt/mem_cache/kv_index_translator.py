@@ -146,7 +146,24 @@ class KVIndexTranslator:
         )
         self.is_translating = is_unified_target or is_fused_draft
         self._spaces: Dict[IdSpaceKind, IdSpace] = {}
-        if self.is_translating:
+        if (
+            is_fused_draft
+            and getattr(token_to_kv_pool, "host_sub_pool_name", None) == "swa"
+        ):
+            # A window-bounded draft fused whole into the swa entries: its one
+            # id space is the target's sliding-window space, keyed alike so a
+            # plan translates the window once for both.
+            alloc = token_to_kv_pool_allocator
+            self._capture_page_size = alloc.page_size
+            self._full_v2p_table = alloc.swa_v2p_page_table
+            self._translate_full = alloc.translate_loc_from_full_to_swa
+            self.defer_read_translate = False
+            self._spaces[IdSpaceKind.FULL] = IdSpace(
+                key=(IdSpaceKind.SLIDING_WINDOW, id(alloc)),
+                write=alloc.translate_loc_from_full_to_swa,
+                read_v2p=self._full_v2p_table,
+            )
+        elif self.is_translating:
             alloc = token_to_kv_pool_allocator
             self._capture_page_size = alloc.page_size
             self._full_v2p_table = alloc.full_v2p_page_table

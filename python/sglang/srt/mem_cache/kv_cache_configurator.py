@@ -1089,6 +1089,7 @@ class KVCacheConfigurator:
             PlacementContext,
             draft_kv_profile,
             place_fused_draft,
+            window_bounded_profile,
         )
         from sglang.srt.mem_cache.unified_memory_pool import _store_dtype_for
 
@@ -1185,6 +1186,12 @@ class KVCacheConfigurator:
             return FusedDraftDecision(
                 declined="HiCache fused DFLASH requires a full-attention-only draft"
             )
+        target_window = self.model_config.sliding_window_size
+        if aux.dflash_draft_kv_in_swa_slots:
+            # A windowed DFLASH draft rides in the swa entries, which keep the
+            # retention window it reads (this configurator's window).
+            profile = window_bounded_profile(profile, window=self.sliding_window_size)
+            target_window = self.sliding_window_size
         num_runners = (
             int(get_spec().speculative_num_steps)
             if self.model_config.is_multi_layer_eagle
@@ -1232,7 +1239,7 @@ class KVCacheConfigurator:
             num_runners=num_runners,
             ctx=PlacementContext(
                 host_names=self._unified_host_names(),
-                target_window=self.model_config.sliding_window_size,
+                target_window=target_window,
                 asymmetric_rows_ok=self._draft_backends_carry_v_head_dim(),
                 draft_backends=self._draft_attention_backends(),
             ),
@@ -1411,6 +1418,17 @@ class KVCacheConfigurator:
         fuse is refused rather than overcommit GPU memory."""
         decision = self._fused_draft_decision()
         placement = self._fused_draft_for_pool_factory(decision)
+        if (
+            placement is None
+            and self.spec_aux_config.dflash_draft_kv_in_swa_slots
+            and not self.is_draft_worker
+        ):
+            reason = decision.declined or "fusion does not apply to it"
+            raise ValueError(
+                "--enable-unified-memory + a windowed DFLASH draft needs the "
+                "draft's KV fused into the target's sliding-window entries, but "
+                f"it cannot fuse ({reason})."
+            )
         if (
             placement is None
             and self.spec_algorithm.is_eagle()

@@ -194,14 +194,17 @@ def dflash_swa_draft_kv_blocker(
 
     The draft pool is then indexed by the target's sliding-window slot ids
     instead of its full-attention ids, so it takes one slot per live
-    sliding-window token rather than one per target token.
+    sliding-window token rather than one per target token. Under unified
+    memory its rows ride in the target's sliding-window entries instead.
     """
     if draft_window_size is None:
         return "--speculative-draft-window-size is unset"
     if not target_has_swa_slots:
         return "the target has no paged sliding-window pool beside a full pool"
-    if enable_unified_memory:
-        return "--enable-unified-memory places the draft in the unified pool"
+    if enable_unified_memory and (
+        disaggregation_mode != "null" or enable_hierarchical_cache
+    ):
+        return "PD and HiCache are not supported with --enable-unified-memory"
     if disaggregation_mode != "null":
         return "PD disaggregation transfers the draft KV by full-attention ids"
     if enable_hierarchical_cache:

@@ -673,9 +673,10 @@ draft KV lives in the target's sliding-window slots instead:
   been generated since; this affects only acceptance, never outputs.
 
 Raise `--swa-full-tokens-ratio` if the server log reports sliding-window pool
-pressure. Other targets,
-and unified memory, PD disaggregation, HiCache, dp attention and context
-parallelism, keep a full-size draft pool; the startup log says why.
+pressure. With `--enable-unified-memory` the draft's rows ride in the target's
+sliding-window entries instead. Other targets, PD disaggregation, HiCache, dp
+attention and context parallelism keep a full-size draft pool; the startup log
+says why.
 
 ### LiLiCorr: reranked DFlash drafts
 

@@ -77,7 +77,7 @@ class _FakeUnifiedSWAKVPool:
         self._swa_allocator = swa_allocator
 
 
-def _build(n_full=32, n_swa=16, *, swa_region=None):
+def _build(n_full=32, n_swa=16, *, swa_region=None, full_region=True):
     full_spec = MHASubPoolSpec(
         name="full",
         layer_num=2,
@@ -85,8 +85,12 @@ def _build(n_full=32, n_swa=16, *, swa_region=None):
         head_dim=4,
         store_dtype=torch.bfloat16,
         grow_direction="down",
-        draft_region=DenseDraftRegion(
-            lane_num=1, head_num=1, head_dim=8, store_dtype=torch.bfloat16
+        draft_region=(
+            DenseDraftRegion(
+                lane_num=1, head_num=1, head_dim=8, store_dtype=torch.bfloat16
+            )
+            if full_region
+            else None
         ),
     )
     swa_spec = MHASubPoolSpec(
@@ -99,8 +103,8 @@ def _build(n_full=32, n_swa=16, *, swa_region=None):
         draft_region=swa_region,
     )
     total = n_full * full_spec.entry_bytes() + n_swa * swa_spec.entry_bytes()
-    counts = {"full": [1]}
-    regions = {"full": full_spec.draft_region}
+    counts = {"full": [1]} if full_region else {}
+    regions = {"full": full_spec.draft_region} if full_region else {}
     if swa_region is not None:
         counts["swa"] = [1]
         regions["swa"] = swa_region
@@ -125,7 +129,7 @@ def _build(n_full=32, n_swa=16, *, swa_region=None):
     )
     draft_pool = UnifiedDraftKVPool(
         unified_buffer=pool,
-        host_sub_pool_name="full",
+        host_sub_pool_name="full" if full_region else "swa",
         host_allocator=allocator,
         layer_lanes={0: 0},
         page_size=_PS,
@@ -222,6 +226,42 @@ class TestKVIndexTranslatorDraftDisposition(unittest.TestCase):
         )
         self.assertTrue(torch.equal(draft_write, target_write))
         self.assertTrue(torch.equal(draft_read, target_read))
+
+    def test_swa_hosted_draft_takes_the_targets_sliding_window_ids(self):
+        """A full-attention draft fused whole into the swa entries (a windowed
+        DFLASH draft) writes and reads the target's sliding-window physical
+        ids, keyed like the target's swa space so one plan translates the
+        window once for both."""
+        swa_region = DenseDraftRegion(
+            lane_num=1, head_num=1, head_dim=8, store_dtype=torch.bfloat16
+        )
+        _, allocator, kvcache, draft_pool = _build(
+            swa_region=swa_region, full_region=False
+        )
+        draft = _source(allocator, draft_pool)
+        target = _source(allocator, kvcache)
+        self.assertTrue(draft.is_translating)
+        draft_space = draft.space(IdSpaceKind.FULL)
+        self.assertEqual(draft_space.key, target.space(IdSpaceKind.SLIDING_WINDOW).key)
+        self.assertIs(draft_space.read_v2p, allocator.swa_v2p_page_table)
+
+        v = allocator.alloc(2 * _PS)
+        self.assertIsNotNone(v)
+        plan = target.plan(
+            req_pool_indices=torch.tensor([0]),
+            seq_lens=torch.tensor([0]),
+            seq_lens_cpu=torch.tensor([0]),
+            write_virtual=v,
+        )
+        fb = SimpleNamespace()
+        plan.bind(fb, draft)
+        torch.testing.assert_close(
+            fb.out_cache_loc, allocator.translate_loc_from_full_to_swa(v)
+        )
+        self.assertIs(
+            plan.write_ids(draft),
+            plan.write_ids(target, kind=IdSpaceKind.SLIDING_WINDOW),
+        )
 
     def test_a_window_depth_reads_the_plan_a_dense_depth_built(self):
         """A multi-layer draft plans each draft extend once, through its first

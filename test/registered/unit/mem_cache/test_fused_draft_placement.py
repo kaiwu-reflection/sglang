@@ -67,6 +67,7 @@ from sglang.srt.mem_cache.layout.fused_draft import (
     draft_kv_profile,
     place_fused_draft,
     register_host_kind,
+    window_bounded_profile,
 )
 from sglang.srt.runtime_context import get_parallel, override_platform
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -243,6 +244,25 @@ class TestPlaceFusedDraft(CustomTestCase):
         self.assertIn("triton", decision.declined)
         # A full-only draft never consults the rail rule.
         self.assertIsNotNone(_place(_profile(), draft_backends=("fa3",)).placement)
+
+    def test_a_window_bounded_draft_rides_whole_in_the_swa_sub_pool(self):
+        """A windowed DFLASH draft reads its window through its own rows, so
+        its full-attention layers ride in swa on any backend, as long as the
+        swa sub-pool keeps the window it reads."""
+        profile = window_bounded_profile(_profile(num_layers=2), window=4168)
+        decision = _place(profile, target_window=4168, draft_backends=("trtllm_mha",))
+        placement = decision.placement
+        self.assertIsNotNone(placement, decision.declined)
+        self.assertEqual(placement.hosts(), ("swa",))
+        self.assertEqual(placement.region("swa").lane_num, 2)
+        # The binder reads this to skip the swa window rail.
+        self.assertEqual(placement.own_rows_hosts, ("swa",))
+        self.assertEqual(
+            _place(_profile(), target_window=4168).placement.own_rows_hosts, ()
+        )
+        narrower = _place(profile, target_window=512, draft_backends=("trtllm_mha",))
+        self.assertEqual(narrower.placement.hosts(), ("full",))
+        self.assertIn("exceeds the target's window 512", narrower.note)
 
     def test_per_depth_head_needs_one_runner_per_depth(self):
         self.assertIsNone(_place(_profile(num_layers=8, num_depths=8), 1).placement)
@@ -661,6 +681,7 @@ class TestFusedDraftDecision(CustomTestCase):
         hicache=False,
         retraction_backup=None,
         draft_parallel_layout=None,
+        windowed=False,
     ):
         from sglang.srt.configs.model_config import AttentionArch
         from sglang.srt.mem_cache import kv_cache_configurator as kvc
@@ -674,13 +695,16 @@ class TestFusedDraftDecision(CustomTestCase):
         cfg.is_draft_worker = False
         cfg.spec_algorithm = SpeculativeAlgorithm.from_string(algorithm)
         cfg.model_config = SimpleNamespace(
-            is_multi_layer_eagle=False, sliding_window_size=None
+            is_multi_layer_eagle=False, sliding_window_size=512 if windowed else None
         )
+        # A windowed DFLASH draft widens the window the swa sub-pool keeps.
+        cfg.sliding_window_size = 4168 if windowed else None
         cfg.kv_cache_dtype = host_kv_dtype
         cfg.spec_aux_config = SimpleNamespace(
             eagle_draft_num_layers=1,
             draft_kv_num_layers=1,
             dflash_draft_num_layers=1,
+            dflash_draft_kv_in_swa_slots=windowed,
             draft_model_config=SimpleNamespace(
                 is_hybrid_swa=False,
                 is_deepseek_v4_arch=False,
@@ -816,6 +840,19 @@ class TestFusedDraftDecision(CustomTestCase):
         # A draft with no backend of its own inherits the target's trtllm_mha.
         decision = self._decide(target_backends=("trtllm_mha", "trtllm_mha"))
         self.assertIsNotNone(decision.placement)
+
+    def test_a_windowed_dflash_draft_fuses_into_the_swa_entries(self):
+        """A windowed DFLASH draft rides in the sliding-window entries, which
+        keep the window it reads, on the backend the target runs."""
+        for windowed, host in ((True, "swa"), (False, "full")):
+            with self.subTest(windowed=windowed):
+                decision = self._decide(
+                    algorithm="DFLASH",
+                    draft_backend="trtllm_mha",
+                    windowed=windowed,
+                )
+                self.assertIsNotNone(decision.placement, decision.declined)
+                self.assertEqual(decision.placement.hosts(), (host,))
 
     def test_dcp_keeps_the_private_pool(self):
         """Under --dcp-size > 1 each rank's host rows hold only its share of

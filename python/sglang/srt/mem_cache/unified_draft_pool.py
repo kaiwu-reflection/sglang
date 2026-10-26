@@ -96,6 +96,10 @@ class UnifiedDraftKVPool(MHATokenToKVPool):
             kv_cache_layout="page_major",
         )
 
+    @property
+    def host_sub_pool_name(self) -> str:
+        return self._host_sub_pool_name
+
     def _create_buffers(self):
         self.k_buffer = self._k_views
         self.v_buffer = self._v_views
@@ -579,6 +583,17 @@ def _bind_dense(ctx: BindContext, binding: FusedDraftBinding) -> FusedDraftBindi
             host_sub_pool_name="full",
             host_allocator=ctx.host_allocator,
             layer_lanes=dict(zip(full_ids, full_lanes)),
+            page_size=ctx.page_size,
+        )
+    elif "swa" in ctx.placement.own_rows_hosts:
+        # A window-bounded draft that reads through its own rows (a windowed
+        # DFLASH draft): one dense pool over the swa entries, no swa rail.
+        assert not full_ids, full_ids
+        pool = UnifiedDraftKVPool(
+            unified_buffer=ctx.unified_buffer,
+            host_sub_pool_name="swa",
+            host_allocator=ctx.host_allocator,
+            layer_lanes=dict(zip(swa_ids, swa_lanes)),
             page_size=ctx.page_size,
         )
     else:

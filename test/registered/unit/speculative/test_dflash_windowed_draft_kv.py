@@ -45,7 +45,6 @@ class TestBlocker(CustomTestCase):
         for field, value in [
             ("draft_window_size", None),
             ("target_has_swa_slots", False),
-            ("enable_unified_memory", True),
             ("disaggregation_mode", "decode"),
             ("enable_hierarchical_cache", True),
             ("post_capture_kv_sizing", True),
@@ -58,6 +57,18 @@ class TestBlocker(CustomTestCase):
             with self.subTest(field=field):
                 self.assertIsNotNone(
                     dflash_swa_draft_kv_blocker(**{**_SUPPORTED, field: value})
+                )
+
+    def test_unified_memory_is_supported_without_pd_or_hicache(self):
+        unified = {**_SUPPORTED, "enable_unified_memory": True}
+        self.assertIsNone(dflash_swa_draft_kv_blocker(**unified))
+        for field, value in [
+            ("disaggregation_mode", "prefill"),
+            ("enable_hierarchical_cache", True),
+        ]:
+            with self.subTest(field=field):
+                self.assertIsNotNone(
+                    dflash_swa_draft_kv_blocker(**{**unified, field: value})
                 )
 
 

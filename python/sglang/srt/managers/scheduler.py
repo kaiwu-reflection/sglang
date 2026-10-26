@@ -2724,7 +2724,8 @@ class Scheduler(
             input_len,
             max_new_tokens,
             token_capacity=token_capacity,
-            sliding_window_size=self.sliding_window_size,
+            # A draft that reads past the window keeps that much SWA too.
+            sliding_window_size=self.tree_cache.swa_retain_window,
             chunk_size=self.chunked_prefill_size,
         )
         if max_new_tokens is None:
